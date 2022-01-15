@@ -1,0 +1,3362 @@
+---
+title: "Analysis of influencing factors of the number of short video likes and establishment of clustering, generative, and classification models"
+author: ''
+date: "2021/12/29"
+always_allow_html: yes
+output:
+  pdf_document:
+    keep_tex: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Group members:
+
+Zhengqian Cui 11912505; Hanbin Liu 11912410; Haoyv Liao 11911921
+
+# Data Source: Bear Club
+
+# Background:
+
+Short video refers to high-frequency video content that is played on a variety of new media, suitable for viewing in the mobile state and short-term leisure state, and the duration is generally less than 5 minutes. According to data from iResearch Consulting, in 2018, the number of short video users in China reached 501 million. It is expected that the user scale of China's short video industry will continue to grow steadily in the future. The content value, popularity, and spread of short videos can be reflected by key indicators such as the number of likes. This case studies the influencing factors of the number of short video likes, so as to deepen people’s understanding of the factors affecting short video preferences, and summarizes a set of feasible methods that can effectively increase the number of short video likes, helping operators to better account and Video management.
+
+# Data:
+
+Each column corresponds to: serial number, author number, number of likes, number of comments, number of shares, BGM, duration, release date, release time, type, title number.
+
+# Contents:
+
+- Data Pre-processing & Exploratory Data Analysis(EDA)
+- Regression Analysis on the number of likes
+- Categorical Data Analysis of author, BGM and time
+- Use nonparametric method to verify linear regression & ANOVA
+- Clustering analysis of short video & Generative Model
+- Classification of short video types based on PCA
+
+
+
+# 1 Data Pre-processing & Exploratory Data Analysis(EDA)
+## 1.1 Data clean
+### 1.1.1 Data import
+```{r}
+video <-
+  read.csv("短视频点赞量影响因素分析/data.csv",
+           header = TRUE,
+           encoding = "UTF-8")
+names(video)
+names(video)[1:5] <-
+  c("index", "author", "like", "comment", "share")
+names(video)[7:11] <- c("duration", "发布日期", "发布时间", "type", "title")
+```
+
+### 1.1.2 Missing values and duplicated rows
+```{r}
+## missing values
+any(is.na(video))
+
+## duplicated rows
+sel_video <- video[, c("index", "like", "comment", "share")]
+dup <-
+  sel_video[duplicated(sel_video[,-1]) |
+              duplicated(sel_video[,-1], fromLast = TRUE), ]
+ind <- dup[order(dup$like),]$index
+
+duplicated <- video[ind, -6][, -10]
+duplicated
+```
+There are duplicated rows and many same videos but come from different type. The reason is unknown, but it's clear that a short video with no more than 60 seconds should not be contained in several different types. Hence, we have to see such duplicated observations as wrong observations, which can't provide proper information to our analysis. So we decide to delete them.
+
+Authors of these videos 
+```{r}
+sort(table(duplicated$author), decreasing = TRUE)
+```
+Author7 have 44 these kind of videos!
+
+```{r}
+## save the index
+dup <- ind
+
+## delete them
+video_origin <- video
+video <- video[-ind,]
+```
+
+### 1.1.3 split day and time variables
+```{r}
+library(lubridate)
+time <- paste(video$发布日期, video$发布时间)
+time <- strftime(time)
+```
+
+```{r}
+video$quarter <- quarter(time)
+video$month <- month(time)
+video$week <- week(time)
+video$weekday <- wday(time)
+video$day <- day(time)
+video$hour <- hour(time)
+video$minute <- minute(time)
+video$second <- second(time)
+
+video[1:5, ]
+video <- video[, -c(8, 9)]
+video[1:5, ]
+```
+
+### 1.1.4 hour ---> time period
+```{r}
+ind1 <- video$hour >= 0 & video$hour < 9
+ind2 <- video$hour >= 9 & video$hour < 12
+ind3 <- video$hour >= 12 & video$hour < 16
+ind4 <- video$hour >= 16 & video$hour < 18
+ind5 <- video$hour >= 18 & video$hour < 20
+ind6 <- video$hour >= 20
+
+video$period <- 0
+video$period[ind1] <- "20:00-9:00"
+video$period[ind6] <- "20:00-9:00"
+video$period[ind2] <- "09:00-12:00"
+video$period[ind3] <- "12:00-16:00"
+video$period[ind4] <- "16:00-18:00"
+video$period[ind5] <- "18:00-20:00"
+```
+The criterion of splitting time periods within a day is chosen by ourselves, and we want to make the number of observations in each period roughly equal, while keep the period easy to interpret, i.e., "20:00-9:00" can be seen as "at night".
+
+### 1.1.5 split BGM 
+```{r}
+tp <- video$BGM == "作者创作的原声"
+video$BGM[tp] <- "Original"
+video$BGM[!tp] <- "Non-original"
+table(video$BGM)
+```
+We divide BGM in two categories, only consider it is original or not.
+
+### 1.1.6 author
+```{r}
+table(table(video$author))
+## save author
+video$author_index <- 0
+video$author_index <- video$author
+```
+```{r}
+### 1 --> once; 2-3 --> several; 4-11 --> often; >11 --> frequent
+author_level <- function(level, data) {
+  author_unique <- table(data$author)
+  
+  if (level == "once") {
+    tp <- author_unique[author_unique == 1]
+  } else if (level == "several") {
+    tp <- author_unique[author_unique == 2 | author_unique == 3]
+  } else if (level == "often") {
+    tp <- author_unique[author_unique >= 4 & author_unique <= 11]
+  } else if (level == "frequent") {
+    tp <- author_unique[author_unique >= 12]
+  }
+  
+  ind <- as.integer(names(tp))
+  indd <- data$author %in% ind
+  data$author[indd] <- level
+  return(data)
+}
+
+video <- author_level("once", video)
+video <- author_level("several", video)
+video <- author_level("often", video)
+video <- author_level("frequent", video)
+
+table(video$author)
+```
+The criterion of splitting time periods within a day is chosen by ourselves. "Once" means he has only one contribution, "several" means 2 or 3 videos, "often" for [4, 11] and "frequent" for more than 11.
+
+Now we test whether there are authors who contribute videos in more than one type.
+```{r}
+matrix <- table(video$author_index, video$type)
+matrix[1:10, ]
+
+sumoftype <- apply(matrix, 1, sum)
+maxoftype <- apply(matrix, 1, max)
+difference <- sumoftype - maxoftype
+table(difference)
+```
+There is no such author.
+
+### 1.1.7 Rename and factoring
+
+```{r}
+### rename
+table(video$type)
+ind1 <- video$type == "美食"
+ind2 <- video$type == "美妆"
+ind3 <- video$type == "游戏"
+ind4 <- video$type == "穿搭"
+ind5 <- video$type == "宠物"
+ind6 <- video$type == "汽车"
+ind7 <- video$type == "剧情"
+```
+
+```{r}
+video$type[ind1] <- "food"
+video$type[ind2] <- "makeup"
+video$type[ind3] <- "game"
+video$type[ind4] <- "dress"
+video$type[ind5] <- "pet"
+video$type[ind6] <- "car"
+video$type[ind7] <- "plot"
+table(video$type)
+
+### factoring
+video$author <-
+  factor(video$author,
+         levels = c("once", "several", "often", "frequent"))
+video$BGM <- factor(video$BGM)
+video$quarter <- factor(video$quarter)
+video$month <- factor(video$month)
+video$week <- factor(video$week)
+video$weekday <- factor(video$weekday)
+video$day <- factor(video$day)
+video$hour <- factor(video$hour)
+video$period <- factor(video$period)
+```
+```{r}
+## this order is compatible to the index
+video$type <-
+  factor(video$type,
+         levels = c("food", "makeup", "game", "dress", "pet", "car", "plot"))
+plot(video$type, video$index)
+video$type <-
+  factor(video$type,
+         levels = c("car", "pet", "dress", "makeup", "food", "game", "plot"))
+```
+The index intervals of all types of videos don't overlap.
+
+### 1.1.8 Data transformation
+```{r}
+### original data
+library(viridis)
+viridis_palatte = viridis(7)
+a <- video$like
+
+n <- length(a)
+s <- sd(a)
+iqr <- IQR(a)
+hstariqr <- 2.6 * iqr * n ^ (-1 / 3)
+nobreaks <- (max(a) - min(a)) / hstariqr
+hist(
+  a,
+  breaks = round(nobreaks),
+  probability = TRUE,
+  col = viridis_palatte[3],
+  xlab = "like",
+  main = "Histogram of like"
+)
+lines(density(a, kernel = "gaussian", bw = 200000),
+      col = viridis_palatte[5],
+      lwd = 2)
+```
+Clearly, this is skew and not normal.
+
+```{r}
+### use log
+a <- video$like
+a <- log(a)
+n <- length(a)
+s <- sd(a)
+iqr <- IQR(a)
+hstariqr <- 2.6 * iqr * n ^ (-1 / 3)
+nobreaks <- (max(a) - min(a)) / hstariqr
+hist(
+  a,
+  breaks = round(nobreaks),
+  probability = TRUE,
+  col = viridis_palatte[3],
+  xlab = "log(like)",
+  main = "Histogram of log(like)"
+)
+lines(density(a, kernel = "gaussian", bw = 0.2),
+      col = viridis_palatte[5],
+      lwd = 2)
+### Q-Q plot
+library(car)
+qqPlot(a)
+```
+This is skew and not normal yet, but if we can delete data with log(like) less than 11.5, then the data may obey normal assumption. Let's first see the data with log(like_number) less than 11.
+
+```{r}
+abnormal <- video[log(video$like) < 11.5, ]
+### first 10 rows
+abnormal[1:10, ]
+```
+Note that the categories of these 10 videos are all cars. We guess this holds for all such data. Let's verify.
+
+```{r}
+### only one type: car
+table(abnormal$type)
+```
+Therefore, we put forward a reasonable assumption: video data with car category are generated from another population, which is different from the population generating other category video data. Then, we should divide original data into two groups for further data transformation.
+
+```{r}
+ind <- video$type == "car"
+video_car <- video[ind, ]
+video_car$type <- NULL
+video_nocar <- video[!ind, ]
+
+### use log & without category==car
+a <- video_nocar$like
+a <- log(a)
+n <- length(a)
+s <- sd(a)
+iqr <- IQR(a)
+hstariqr <- 2.6 * iqr * n ^ (-1 / 3)
+nobreaks <- (max(a) - min(a)) / hstariqr
+hist(
+  a,
+  breaks = round(nobreaks),
+  probability = TRUE,
+  col = viridis_palatte[3],
+  xlab = "log(like)",
+  main = "Histogram of log(like) without car category"
+)
+lines(density(a, kernel = "gaussian", bw = 0.2),
+      col = viridis_palatte[5],
+      lwd = 2)
+legend(
+  12,
+  0.8,
+  legend = c("gaussian"),
+  col = c(viridis_palatte[5]),
+  lty = 1,
+  cex = 1
+)
+### Q-Q plot
+qqPlot(a)
+```
+Clearly, data without car category is symmetric and seem to obey a normal distribution. This strengthens our assumption that data with car category are generated from another population comparing to other data.
+
+```{r}
+### histogram for car type
+a <- video_car$like
+n <- length(a)
+s <- sd(a)
+iqr <- IQR(a)
+hstariqr <- 2.6 * iqr * n ^ (-1 / 3)
+nobreaks <- (max(a) - min(a)) / hstariqr
+hist(
+  a,
+  breaks = round(nobreaks),
+  probability = TRUE,
+  col = viridis_palatte[3],
+  xlab = "like",
+  main = "Histogram of log(like) for car category"
+)
+lines(density(a, kernel = "gaussian", bw = 25000),
+      col = viridis_palatte[5],
+      lwd = 2)
+legend(
+  2000000,
+  8e-06,
+  legend = c("gaussian"),
+  col = c(viridis_palatte[5]),
+  lty = 1,
+  cex = 1
+)
+```
+The histogram suggests that the data with car type may obey an exponential distribution.
+
+We use nonparametric gaussian density estimation to fit data with car category and other data respectively, and it looks well.
+
+## 1.2 Data Visualization
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(ggthemes)
+library(hrbrthemes)
+library(viridis)
+```
+
+### 1.2.1 A doughnut plot for four categories of author
+
+```{r}
+### pie chart for video$author
+library(dplyr)
+tp <-
+  data.frame(
+    author = c("once", "several", "often", "frequent"),
+    Freq = c(1660, 1397, 1534, 1540)
+  )
+
+tp$fraction <- tp$Freq / sum(tp$Freq)
+tp$maxy <- cumsum(tp$fraction)
+tp$miny <- c(0, head(tp$maxy, n = -1))
+tp$labelPosition <- (1 * tp$maxy + 1 * tp$miny) / 2
+tp$fraction <- round(tp$fraction, digits = 3) * 100
+tp$label <-
+  paste0(tp$author, "\n count: ", tp$Freq, "\n", tp$fraction, "%")
+
+ggplot(tp, aes(
+  ymax = maxy,
+  ymin = miny,
+  xmax = 4,
+  xmin = 1,
+  fill = author
+)) +
+  geom_rect() +
+  geom_text(
+    x = 2.5,
+    aes(y = labelPosition, label = label),
+    size = 3,
+    colour = c("black", "black", "white", "white")
+  ) +
+  theme(axis.text.y = element_blank()) +
+  coord_polar(theta = "y") +
+  xlim(c(-1, 4)) +
+  theme(axis.title = element_blank()) +
+  theme(axis.text = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  scale_fill_viridis(discrete = TRUE,
+                     breaks = c("once", "several", "often", "frequent")) +
+  ggtitle("Doughnut plot for the 4 categories of author") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+The criterion(explained before) of classifying 4 categories of author is decided by ourselves, and we purposely divide them roughly equally. The pie chart verify that.
+
+### 1.2.2 A doughnut plot of two categories of BGM
+
+```{r}
+tp <- as.data.frame(table(video$BGM))
+colnames(tp) <- c("BGM", "Freq")
+
+tp$fraction <- tp$Freq / sum(tp$Freq)
+tp$maxy <- cumsum(tp$fraction)
+tp$miny <- c(0, head(tp$maxy, n = -1))
+tp$labelPosition <- (1 * tp$maxy + 1 * tp$miny) / 2
+tp$fraction <- round(tp$fraction, digits = 3) * 100
+tp$label <-
+  paste0(tp$BGM, "\n count: ", tp$Freq, "\n", tp$fraction, "%")
+
+ggplot(tp, aes(
+  ymax = maxy,
+  ymin = miny,
+  xmax = 4,
+  xmin = 1,
+  fill = BGM
+)) +
+  geom_rect() +
+  geom_text(
+    x = 2.5,
+    aes(y = labelPosition, label = label),
+    size = 3,
+    colour = c("black", "white")
+  ) +
+  theme(axis.text.y = element_blank()) +
+  coord_polar(theta = "y") +
+  xlim(c(-1, 4)) +
+  theme(axis.title = element_blank()) +
+  theme(axis.text = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  scale_fill_manual(
+    values = c(viridis_palatte[3], viridis_palatte[7]),
+    breaks = c("Original", "Non-original")
+  ) +
+  ggtitle("Doughnut plot for two categories of BGM") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+Most of the videos use original audio (not necessarily music, but maybe the author's voice), while only 14% videos use made-up snatches of music.
+
+### 1.2.3 A doughnut plot of 5 categories of period
+
+```{r}
+tp <- as.data.frame(table(video$period))
+colnames(tp) <- c("period", "Freq")
+
+tp$fraction <- tp$Freq / sum(tp$Freq)
+tp$maxy <- cumsum(tp$fraction)
+tp$miny <- c(0, head(tp$maxy, n = -1))
+tp$labelPosition <- (1 * tp$maxy + 1 * tp$miny) / 2
+tp$fraction <- round(tp$fraction, digits = 3) * 100
+tp$label <-
+  paste0(tp$period, "\n count: ", tp$Freq, "\n", tp$fraction, "%")
+
+ggplot(tp, aes(
+  ymax = maxy,
+  ymin = miny,
+  xmax = 8,
+  xmin = 1,
+  fill = period
+)) +
+  geom_rect() +
+  geom_text(
+    x = 5,
+    aes(y = labelPosition, label = label),
+    size = 3,
+    colour = c("white", "white", "white", "black", "black")
+  ) +
+  theme(axis.text.y = element_blank()) +
+  coord_polar(theta = "y") +
+  xlim(c(-2, 8)) +
+  theme(axis.title = element_blank()) +
+  theme(axis.text = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  scale_fill_viridis(begin = 0,
+                     end = 1 ,
+                     discrete = TRUE) +
+  ggtitle("Doughnut plot for 5 categories of period") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+Similar to the division of author, we purposely divide period approximately equally.
+
+### 1.2.4 A doughnut plot of 7 categories of weekday
+
+```{r}
+tp <- as.data.frame(table(video$weekday))
+colnames(tp) <- c("weekday", "Freq")
+
+tp$fraction <- tp$Freq / sum(tp$Freq)
+tp$maxy <- cumsum(tp$fraction)
+tp$miny <- c(0, head(tp$maxy, n = -1))
+tp$labelPosition <- (1 * tp$maxy + 1 * tp$miny) / 2
+tp$fraction <- round(tp$fraction, digits = 3) * 100
+tp$label <-
+  paste0(tp$weekday, "\n count: ", tp$Freq, "\n", tp$fraction, "%")
+
+ggplot(tp, aes(
+  ymax = maxy,
+  ymin = miny,
+  xmax = 4,
+  xmin = 1,
+  fill = weekday
+)) +
+  geom_rect() +
+  geom_text(
+    x = 2.5,
+    aes(y = labelPosition, label = label),
+    size = 3,
+    colour = c("white", "white", "white", "white", "black", "black", "black")
+  ) +
+  theme(axis.text.y = element_blank()) +
+  coord_polar(theta = "y") +
+  xlim(c(-1, 4)) +
+  theme(axis.title = element_blank()) +
+  theme(axis.text = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  scale_fill_viridis(begin = 0,
+                     end = 1 ,
+                     discrete = TRUE) +
+  ggtitle("Doughnut plot for 7 categories of weekday") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+There are slightly more works on the weekend, while the counts of contributions on each day of a week don't differ much.
+
+### 1.2.5 A doughnut plot of 7 categories of type
+
+```{r}
+tp <- as.data.frame(table(video$type))
+colnames(tp) <- c("type", "Freq")
+
+tp$fraction <- tp$Freq / sum(tp$Freq)
+tp$maxy <- cumsum(tp$fraction)
+tp$miny <- c(0, head(tp$maxy, n = -1))
+tp$labelPosition <- (1 * tp$maxy + 1 * tp$miny) / 2
+tp$fraction <- round(tp$fraction, digits = 3) * 100
+tp$label <-
+  paste0(tp$type, "\n count: ", tp$Freq, "\n", tp$fraction, "%")
+tp$label[7] = paste0(tp$type[7], "\n (", tp$Freq[7], ")\n", tp$fraction[7], "%")
+
+ggplot(tp, aes(
+  ymax = maxy,
+  ymin = miny,
+  xmax = 4,
+  xmin = 1,
+  fill = type
+)) +
+  geom_rect() +
+  geom_text(
+    x = 2.5,
+    aes(y = labelPosition, label = label),
+    size = 3,
+    colour = c("white", "white", "white", "white", "black", "black", "black")
+  ) +
+  theme(axis.text.y = element_blank()) +
+  coord_polar(theta = "y") +
+  xlim(c(-1, 4)) +
+  theme(axis.title = element_blank()) +
+  theme(axis.text = element_blank()) +
+  theme(axis.ticks = element_blank()) +
+  scale_fill_viridis(begin = 0,
+                     end = 1 ,
+                     discrete = TRUE) +
+  ggtitle("Doughnut plot for 7 categories of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+Before we delete the duplicated data, there are exactly 400 records in type plot and 1000 records in each of the other 6 types. After deletion, such number and proportion for each type generally keep. 
+
+### 1.2.6 A violin plot of duration under 7 categories of type
+
+```{r}
+video %>%
+  ggplot(aes(x = type, y = duration, fill = type)) +
+  geom_violin(width = 1.3, color = "#EBEBEB") +
+  geom_boxplot(width = 0.1,
+               color = "pink",
+               alpha = 0.5) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 11)) +
+  ggtitle("A violin plot of duration under 7 categoreis of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+xlab("type")
+```
+Type dress and plot have special distributions of duration. Most of the videos in type dress are short, while most in Plot are longer, near the upper restriction of video length. This is perhaps because the story in plot video need more time to perform, while a dress video only shares one tiny skill of making up. We can also notice that in type car, makeup, food and game, the density at the middle duration is low, while it's higher at short duration and duration near 60. This implies that some of the videos are designed as a very short works, but many of others are intended to carry much content(maybe can produce a video of several minutes) while can't exceed the time restriction of 60 seconds.
+
+### 1.2.7 A violin plot of title under 7 categories of type
+
+```{r}
+video %>%
+  ggplot(aes(x = type, y = title, fill = type)) +
+  geom_violin(width = 1.1, color = "#EBEBEB") +
+  geom_boxplot(width = 0.1,
+               color = "pink",
+               alpha = 0.5) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 11)) +
+  ggtitle("A violin plot of title under 7 categoreis of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+xlab("type")
+```
+
+There's no much difference between the distributions of title under different types, and the distribution curves are relatively flat. Nevertheless, type plot has a bit difference, since the distribution there has a peak at around 20(s). This may tell us that plot videos are likely to introduce its hook in the story by one or two sentences, resulting in a title around 20 characters.
+
+### 1.2.8 A violin plot of log(like) under 7 categories of type
+
+```{r}
+video %>%
+  ggplot(aes(x = type, y = log(like), fill = type)) +
+  geom_violin(width = 1.3, color = "#EBEBEB") +
+  geom_boxplot(width = 0.1,
+               color = "pink",
+               alpha = 0.5) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 11)) +
+  ggtitle("A violin plot of log(like) under 7 categoreis of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+xlab("type")
+```
+Type has a significant influence on the value of like. From low to high, the order of types is car, pet, dress, makeup, food, game and plot. The mean like in type plot is around 20 times that of car. In each type, the log(like) shows obvious right skewness. 
+
+### 1.2.9 A violin plot of log(comment) under 7 categories of type
+
+```{r}
+video %>%
+  ggplot(aes(
+    x = type,
+    y = log(comment),
+    fill = type
+  )) +
+  geom_violin(width = 1.3, color = "#EBEBEB") +
+  geom_boxplot(width = 0.1,
+               color = "pink",
+               alpha = 0.5) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 11)) +
+  ggtitle("A violin plot of log(comment) under 7 categoreis of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+xlab("type")
+```
+Type also has a significant influence on the value of comment.The order of types is the same as that for like. The mean like in type plot is around 7 times that of car. In each type, the distribution of log(like) shows symmetry.
+
+### 1.2.10 A violin plot of log(share) under 7 categories of type
+
+```{r}
+video %>%
+  ggplot(aes(x = type, y = log(share), fill = type)) +
+  geom_violin(width = 1.6, color = "#EBEBEB") +
+  geom_boxplot(width = 0.1,
+               color = "pink",
+               alpha = 0.5) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 11)) +
+  ggtitle("A violin plot of log(share) under 7 categoreis of type") +
+  theme(plot.title = element_text(hjust = 0.5))
+xlab("type")
+```
+The feature of share under different types is similar to that of comment, only that the difference between types is not as distinct. Now we compare the three violin plots for like, comment and share. An obvious difference is that comment and share have much fewer "very high" values than like. Since like, comment and share are naturally closely connected, we suspect that some of the very high like values are attained by cheating using technical methods.
+
+### 1.2.11 2D histogram for log(like) and duration
+
+```{r}
+ggplot(video, aes(x = duration, y = log(like))) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_distiller(palette = "viridis", direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(legend.position = 'none') +
+  ggtitle("2D histogram for log(like) and duration") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+In such 2D histograms, the darker the color of a region, the greater the joint density there. We notice that the dark stripe is parallel to the axis, which indicates that given any value of duration, the conditional distribution of log(like) is generally the same. So, duration is not an important variable interpreting the variation of like.
+
+### 1.2.12 2D histogram for log(like) and title
+
+```{r}
+ggplot(video, aes(x = title, y = log(like))) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_distiller(palette = "viridis", direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(legend.position = 'none') +
+  ggtitle("2D histogram for log(like) and title") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+Similar to last plot, the dark stripe is parallel to the axis. So, title is not an important variable interpreting the variation of like either.
+
+### 1.2.13 2D histogram for duration and title
+
+```{r}
+ggplot(video, aes(x = title, y = duration)) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_distiller(palette = "viridis", direction = 1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(legend.position = 'none') +
+  ggtitle("2D histogram for duration and title") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+This shows that the correlation between title and duration is not strong.
+
+### 1.2.14 Heatmap for type and author
+
+```{r}
+library(hrbrthemes)
+library(plotly)
+
+tpFrame <- video %>%
+  group_by(type, author) %>%
+  summarize(count = n())
+
+tpFrame <- tpFrame %>%
+  mutate(text = paste0("type: ", type, "\n", "author: ", author, "\n", "count: ", count))
+
+p <- ggplot(tpFrame, aes(type, author, fill = count, text = text)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "viridis") +
+  theme_ipsum() +
+  ggtitle("Heatmap for type and author") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplotly(p, tooltip = "text")
+```
+There are some differences in every type's author's classification. For example, in type game there are many contributors who makes only one video, but in type plot, more authors make larger numbers of videos. Such regular may indicate that plot videos are strong in speciality, while many authors in type game and dress just make videos for fun. This can also explain why plot videos get more likes generally--just like "practice makes perfect".
+
+### 1.2.15 Time series plot for the count of videos in each month
+
+```{r}
+tpFrame <- video %>%
+  group_by(month, type) %>%
+  summarize(count = n())
+tpFrame <-
+  data.frame(month = tpFrame$month,
+             count = tpFrame$count,
+             type = tpFrame$type)
+
+tpFrame$month <- as.numeric(tpFrame$month)
+
+ggplot(tpFrame, aes(x = month, y = count, fill = type)) +
+  geom_area(alpha = 0.8 , size = .5) +
+  scale_fill_viridis(discrete = T) +
+  ggtitle("A plot for the count of videos in each month and under 7 types") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+The total count of videos in the former 4 months is roughly stable, while the proportion of type car gets bigger. The records end at May 9th so the count in May is naturally small. 
+
+### 1.2.16 Time series plot for the count of videos in each week
+
+```{r}
+tpFrame <- video %>%
+  group_by(week, type) %>%
+  summarize(count = n())
+tpFrame <-
+  data.frame(week = tpFrame$week,
+             count = tpFrame$count,
+             type = tpFrame$type)
+
+tpFrame$week <- as.numeric(tpFrame$week)
+
+ggplot(tpFrame, aes(x = week, y = count, fill = type)) +
+  geom_area(alpha = 0.8 , size = .5) +
+  scale_fill_viridis(discrete = T) +
+  ggtitle("A plot for the count of videos in each week and under 7 types") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+The weekly count is not so stable, but most of the significant variation in the first several weeks comes from the fluctuation of type game. In week 15, makeup, dress, pet and car type suffer from a decrease in production at the same time. Generally speaking, this series plot shows some interesting findings but helps little with finding the law behind the variation. 
+
+### 1.2.17 Time series plot for the count of videos in each hour of a day
+```{r}
+tpFrame <- video %>%
+  group_by(hour, type) %>%
+  summarize(count = n())
+tpFrame <-
+  data.frame(hour = tpFrame$hour,
+             count = tpFrame$count,
+             type = tpFrame$type)
+
+tpFrame$hour <- as.numeric(tpFrame$hour)
+
+ggplot(tpFrame, aes(x = hour, y = count, fill = type)) +
+  geom_area(alpha = 0.8 , size = .5) +
+  scale_fill_viridis(discrete = T) +
+  ggtitle("A plot for the count of videos in each hour of a day and under 7 types") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+No matter what the type is, there are much more videos released in around 12 o'clock and 18 o'clock, which are lunch and supper times respectively. During the sleeping times, the number of videos are very small correspondingly. 
+
+### 1.2.18 A plot for the mean of like in days of a week and under 7 types
+
+```{r}
+tpFrame <- video %>%
+  group_by(weekday, type) %>%
+  summarize(mean_of_like = mean(like))
+tpFrame$weekday <- as.numeric(tpFrame$weekday)
+
+ggplot(tpFrame, aes(x = weekday, y = mean_of_like, fill = type)) +
+  geom_area(alpha = 0.8 , size = .5) +
+  scale_fill_viridis(discrete = T) +
+  ggtitle("A plot for the mean of like in days of a week and under 7 types") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+From Monday to Sunday, the average like number of each type keeps stable.
+
+### 1.2.19 A plot for the mean of like in hours of a day and under 7 types
+```{r}
+tpFrame <- video %>%
+  group_by(hour, type) %>%
+  summarize(mean_of_like = mean(like))
+tpFrame$hour <- as.numeric(tpFrame$hour)
+to_merge <-
+  data.frame(
+    hour = c(3, 4, 5, 6, 8, 3, 6, 5),
+    mean_of_like = c(0, 0, 0, 0, 0, 0, 0, 0),
+    type = c("plot", "plot", "plot", "plot", "plot", "food", "food", "makeup")
+  )
+tpFrame <- rbind(tpFrame, to_merge)
+
+ggplot(tpFrame, aes(x = hour, y = mean_of_like, fill = type)) +
+  geom_area(alpha = 0.8 , size = 0.5) +
+  scale_fill_viridis(discrete = T) +
+  ggtitle("A plot for the mean of like in hours of a day and under 7 types") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+At first sight we may think the videos released at midnight have much less ability to attract likes. However, we should notice that some types have exactly 0 records in some hours at night, and their average like numbers will be plotted as zero. Look at it carefully, we find that the attraction to like of type pet, makeup and game don't decrease--that of makeup even increases for some time! 
+
+
+
+# 2 Regression Analysis on the number of likes
+## 2.1 Scatterplot & Transformation
+```{r}
+videos <-
+  as.data.frame(video[, c("like", "comment", "share", "duration", "title")])
+
+cor(videos)
+library(car)
+spm(
+  ~ like + comment + share + duration + title,
+  data = videos,
+  col = "#1972A4",
+  cex = 0.05,
+  pch = 19
+)
+```
+
+```{r}
+library(MASS)
+boxcox(like ~ . - index - author_index,
+       lambda = seq(-3, 3, length = 20),
+       data = video)
+```
+The suggested $\lambda$ is close to 0. So we take the log.
+
+We first use all independent variables.
+```{r warning=FALSE}
+## index is meaningless
+fit1 <- lm(log(like) ~ . - like - index - author_index, data = video)
+summary(fit1)
+```
+
+## 2.2 fit2
+Then we use the stepwise method to delete some useless independent variables so that the model is not too complicated.
+```{r}
+library(olsrr)
+step_plot <- ols_step_both_aic(fit1)
+step_plot
+plot(step_plot)
+```
+
+Redundant variables: quarter, day, hour and minute.
+
+Based on the stepwise output, the new model is given by
+```{r}
+fit2 <-
+  lm(
+    log(like) ~ author + comment + share + BGM + duration +
+      type + title + month + weekday + second + period,
+    data = video
+  )
+```
+
+Use anova() to verify
+```{r}
+anova(fit2, fit1)
+```
+ANOVA suggests that there is a significant effect to add on more predictors. This contradicts the stepwise method, however, we prefer fit2 since fit1 has too many coefficients.
+
+## 2.3 fit3
+
+- Covariates Transformation
+
+We first see the scatter plot for log(like) and comment, log(like) and share.
+```{r}
+library(patchwork)
+p1 <-
+  ggplot(video, aes(
+    x = (video$comment),
+    y = log(video$like))) + 
+  labs(x = "comment",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9, color = "#1972A4") +
+  geom_smooth(method = "loess", color = viridis_palatte[2])
+
+p2 <-
+  ggplot(video, aes(
+    x = (video$share),
+    y = log(video$like)
+  )) +
+  labs(x = "share",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9, color = "#1972A4") +
+  geom_smooth(method = "loess", color = viridis_palatte[2])
+
+p1
+p2
+```
+The linear relation is not significant. So we consider transformation for covariates: 'comment' and 'share'. Since we have taken the logarithm for 'like' and the number of likes, comments, and shares belong to the same level to some extent, it is reasonable to take the logarithm for 'comment' and 'share' too. 
+
+After taking the logarithm, the scatter plots are given by
+```{r}
+p3 <-
+  ggplot(video, aes(
+    x = log(video$comment),
+    y = log(video$like)
+  )) +
+  labs(x = "log(comment)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9, color = "#1972A4") +
+  geom_smooth(method = "loess", color = viridis_palatte[2])
+
+p4 <-
+  ggplot(video, aes(
+    x = log(video$share),
+    y = log(video$like)
+  )) +
+  labs(x = "log(share)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9, color = "#1972A4") +
+  geom_smooth(method = "loess", color = viridis_palatte[2])
+
+p3
+p4
+```
+Obviously, there is a stronger linear relation after taking the logarithm. Now, we have
+```{r}
+fit3 <-
+  lm(
+    log(like) ~ author + log(comment) + log(share) + BGM + duration +
+      type + title + month + weekday + second + period,
+    data = video
+  )
+```
+
+Comparison: (fit1, fit2, fit3)
+```{r}
+library(stargazer)
+
+tp <-
+  c(
+    "author",
+    "BGM",
+    "duration",
+    "type",
+    "title",
+    "quarter",
+    "month",
+    "week",
+    "weekday",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "period"
+  )
+
+stargazer(fit1,
+          fit2,
+          fit3,
+          omit = tp,
+          omit.labels = tp,
+          type = "text")
+```
+
+## 2.4 fit4
+
+```{r}
+plot(fit3)
+```
+Significantly, there are two clusters in the residual plot. Based on our previous analysis, we guess these data are videos with type car. If these data with fitted values less than 11.5 are videos with type car, then there may exist an interaction between type and other variables. Let's verify the guess first.
+
+```{r}
+index <- which(fitted(fit3) < 11.5)
+table(video[index, ]$type)
+```
+All videos with fitted values < 11.5 are type car. This reminds us to consider the interaction of types with other variables. Let's first look at the 3D scatter plot for 'log(like)', 'log(comment)' and 'log(share)'
+```{r}
+library(plotly)
+fig <-
+  plot_ly(
+    x = log(video$comment),
+    y = log(video$share),
+    z = log(video$like),
+    color = video$type,
+    colors = viridis(7)
+  ) %>% add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "A 3D scatter plot for log(like), log(comment) and log(share)", 
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+The type has a decisive influence on the number of likes. The linear relationship between 'log(like)', 'log(comment)' and 'log(share)' of different types of short videos is also different. We then use the smoothing method to see the relation further.
+
+```{r}
+library(patchwork)
+p1 <-
+  ggplot(video, aes(
+    x = log(video$comment),
+    y = log(video$like),
+    color = video$type
+  )) +
+  scale_color_viridis(discrete = TRUE, option = "D")+
+  scale_fill_viridis(discrete = TRUE) +
+  labs(x = "log(comment)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9) +
+  geom_smooth(method = "loess")
+
+p2 <-
+  ggplot(video, aes(
+    x = log(video$comment),
+    y = log(video$like),
+    color = video$type
+  )) +
+  scale_color_viridis(discrete = TRUE, option = "D")+
+  scale_fill_viridis(discrete = TRUE) +
+  labs(x = "log(comment)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9) +
+  geom_smooth(method = "lm")
+
+p3 <-
+  ggplot(video, aes(
+    x = log(video$share),
+    y = log(video$like),
+    color = video$type
+  )) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  scale_fill_viridis(discrete = TRUE) +
+  labs(x = "log(share)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9) +
+  geom_smooth(method = "loess")
+
+p4 <-
+  ggplot(video, aes(
+    x = log(video$share),
+    y = log(video$like),
+    color = video$type
+  )) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  scale_fill_viridis(discrete = TRUE) +
+  labs(x = "log(share)",
+       y = "log(like)",
+       color = "type") +
+  geom_point(alpha = .3, size = .9) +
+  geom_smooth(method = "lm")
+
+p1
+p2
+p3
+p4
+```
+We found that the slopes of short videos in the car type are significantly different from those of other short videos, and the slopes of other types are basically the same. 
+
+Therefore, it is reasonable to consider the interaction between type and other variables. Then, we revise our linear model by introducing the interaction.
+
+Now, we obtain fit4 by introducing a new variable: 'iscar' with values 1 and 0, where 1 represents the car type and 0 means non-car type and consider the interaction.
+```{r}
+ind <- video$type == "car"
+video$iscar <- 0
+video[ind,]$iscar <- 1
+
+fit4 <-
+  lm(
+    log(like) ~ author + log(comment) + log(share) + BGM + duration + type +
+      title + month + weekday + second + period + iscar:(
+        author + log(comment) + log(share) + BGM + duration + title + month +
+          weekday + second + period
+      ),
+    data = video
+  )
+
+## compare R-square
+data.frame(summary(fit3)$r.square, summary(fit4)$r.square)
+```
+Compared with fit3, we find that R-squared is improved significantly.
+
+## 2.5 fit5
+Moreover, are there interactions between other numerical variables? Let's see.
+```{r}
+temp <- video[, c(4, 5, 7, 9)]
+temp$comment <- log(temp$comment)
+temp$share <- log(temp$share)
+names(temp) <-
+  c("log(comment)", "log(share)", "duration", "title")
+
+cor(temp)
+```
+There is a strong correlation between comments and shares. This may be due to the fact that comments and shares both like a video to a deeper level than likes. Sharing will make the video be seen by more people, so the probability of the video being commented Increase 
+
+We add 'log(comment):log(share)' and 'log(share):duration' into the model and get fit5.
+```{r}
+fit5 <-
+  lm(
+    log(like) ~ author + log(comment) + log(share) + BGM + duration + type +
+      title + month + weekday + second + period + iscar:(
+        author + log(comment) + log(share) + BGM + duration + title + month +
+          weekday + second + period
+      ) + log(comment):log(share) + log(share):duration,
+    data = video
+  )
+
+## compare R-square
+data.frame(summary(fit3)$r.square,
+           summary(fit4)$r.square,
+           summary(fit5)$r.square)
+```
+R-squared is improved. 
+
+## 2.6 fit6 
+Now we use the stepwise method to obtain fit6 after variable selection and introducing interactions.
+```{r}
+library(MASS)
+fit6 <- stepAIC(fit5, direction = "both")
+```
+
+Use anova() to verify
+```{r}
+anova(fit5, fit6)
+```
+The p-values is 0.1555, which suggests that there is no significant effect to add on more predictors. So we choose fit6.
+
+Comparison: (fit5,fit6)
+```{r}
+library(stargazer)
+
+tp <-
+  c(
+    "author",
+    "BGM",
+    "comment",
+    "share",
+    "duration",
+    "type",
+    "title",
+    "quarter",
+    "month",
+    "weekday",
+    "second",
+    "period"
+  )
+
+stargazer(fit5,
+          fit6,
+          omit = tp,
+          omit.lables = tp,
+          type = "text")
+```
+The number of coefficients decreased significantly.
+
+## 2.7 fit7 (model diagnostics for fit6)
+### 2.7.1 Basic assumptions
+```{r}
+fit <- fit6
+plot(fit)
+```
+
+- Test Normality
+```{r}
+qqPlot(fit)
+```
+```{r}
+residplot <- function(fit, nbreaks = 20) {
+  z <- rstudent(fit)
+  hist(
+    z,
+    breaks = nbreaks,
+    freq = FALSE,
+    xlab = "Studentized Residual",
+    main = "Distribution of Errors"
+  )
+  rug(jitter(z), col = "brown")
+  curve(
+    dnorm(x, mean = mean(z), sd = sd(z)),
+    add = TRUE,
+    col = "blue",
+    lwd = 2
+  )
+  lines(
+    density(z)$x,
+    density(z)$y,
+    col = "red",
+    lwd = 2,
+    lty = 2
+  )
+  legend(
+    "topright",
+    legend = c("Normal Curve", "Kernel Density Curve"),
+    lty = 1:2,
+    col = c("blue", "red"),
+    cex = .7
+  )
+}
+residplot(fit)
+```
+
+```{r}
+tp <- fit$residuals
+ks.test(tp, "pnorm", mean = mean(tp), sd = sd(tp))
+```
+From the plot, the normality assumption seems to be acceptable. However, the test suggests that it is violated. This will be handled by the bootstrap method later.
+
+- Test Independence of Errors
+```{r}
+durbinWatsonTest(fit)
+```
+The p-value is 0, it seems that the errors are not independent. But the reason may be that the data set is sorted by type. We can see the residual and index plot.
+
+```{r}
+plot(video$index, fit$residuals)
+```
+We think this is the reason leading to the p-value being 0 in the independence test. So let's randomly reorder the index and do the test again.
+```{r}
+set.seed(1234)
+rand <- video[sample(nrow(video), nrow(video)), ]
+
+fit_rand <- lm(fit, data = rand)
+
+durbinWatsonTest(fit_rand)
+```
+The p-value suggests that the errors are independent.
+
+- Test Linearity
+```{r}
+temp <- video
+temp$logcomment.logshare <- log(video$comment) * log(video$share)
+temp$logshare.duration <- log(video$share) * log(video$duration)
+
+tpfit <- lm(
+  log(like) ~ author + log(comment) + log(share) + BGM + duration + type +
+    title + month + period + logcomment.logshare + logshare.duration,
+  data = temp
+)
+
+crPlots(tpfit)
+```
+The component plus residual plots confirm that we have met the linearity assumption.
+
+- Test Homoscedasticity
+```{r}
+ncvTest(fit)
+spreadLevelPlot(fit)
+
+## use suggested power transformation
+tpfit <- lm(
+  log(like)^3 ~ author + log(comment) + log(share) +
+    BGM + duration + type + title + month + period + author:iscar +
+    log(comment):iscar + log(share):iscar + BGM:iscar + duration:iscar +
+    title:iscar + month:iscar + log(comment):log(share) + log(share):duration,
+  data = video
+)
+
+ncvTest(tpfit)
+spreadLevelPlot(tpfit)
+```
+No matter how the data is transformed, the problem of heteroscedasticity exists. We think the heteroscedasticity is caused by the categorical variable 'type' and the linear model cannot handle the problem.
+
+- Test Multicollinearity
+```{r}
+library(car)
+
+## NA in 'author:iscar'   delete this term
+fit <- lm(
+  log(like) ~ author + log(comment) + log(share) +
+    BGM + duration + type + title + month + period +
+    log(comment):iscar + log(share):iscar + BGM:iscar + duration:iscar +
+    title:iscar + month:iscar + log(comment):log(share) + log(share):duration,
+  data = video
+)
+vif(fit)
+```
+
+Reference: 
+
+Fox & Georges Monette (1992) Generalized Collinearity Diagnostics, Journal of the American Statistical Association, 87:417, 178-183, DOI: 10.1080/01621459.1992.10475190
+
+O’brien, R. M. (2007). A caution regarding rules of thumb for variance inflation factors. Quality & quantity, 41(5), 673-690.
+
+Based on these references, we think there exists multicollinearity between 'log(comment):log(share)' and other variables, so we delete this term and calculate the GVIF again.
+```{r}
+fit <- lm(
+  log(like) ~ author + log(comment) + log(share) + BGM + duration + type +
+    title + month + period + log(comment):iscar + log(share):iscar +
+    BGM:iscar + duration:iscar + title:iscar + month:iscar + log(share):duration,
+  data = video
+)
+
+vif(fit)
+```
+Now, it seems that there is no multicollinearity.
+
+In the previous introduction of interaction, 'log(comment) and log(share)' have a strong correlation, and $R^2$ increased by 1% after the model was added to this item. But due to the collinearity problem, we must delete this variable.
+
+### 2.7.2 Unusual Observations
+
+- Outliers
+```{r}
+plot(fit$residuals)
+```
+
+```{r}
+outlierTest(fit)
+
+## delete outliers
+out_ind <-
+  c(
+    which(video$index == 5560),
+    which(video$index == 5142),
+    which(video$index == 5175),
+    which(video$index == 5816),
+    which(video$index == 5321)
+  )
+fit <- lm(fit, data = video[-out_ind, ])
+outlierTest(fit)
+
+## delete outliers
+out_ind <-
+  c(out_ind, which(video$index == 5882))
+fit <- lm(fit, data = video[-out_ind, ])
+outlierTest(fit)
+
+## update data set
+video_filted <- video[-out_ind,]
+```
+There are 6 outliers and we delete them. 
+
+Analyze these 6 outliers
+```{r}
+video[out_ind, -c(10:18,20)]
+```
+Control comment: 5560, 5142, 5175, 5321, 5882. Water army: 5816. All of these 6 outliers are type car.
+
+- High Leverage Points
+```{r}
+hat.plot <- function(fit) {
+  p <- length(coefficients(fit))
+  n <- length(fitted(fit))
+  plot(hatvalues(fit), main = "Index Plot of Hat Values")
+  abline(h = c(2, 3) * p / n,
+         col = "red",
+         lty = 2)
+  identify(1:n, hatvalues(fit), names(hatvalues(fit)))
+}
+
+hat.plot(fit)
+```
+Previous result: index 5001-6000 --- type car
+
+The mean levels of hat values that exceed the red line corresponding to different types of videos are significantly different. Besides, we can clearly find that the hat values corresponding to the car type of video are significantly different from other types. 
+
+Obviously, most of the videos with car type are high leverage points. This can also be seen from the scatter plot.
+
+- Influential Observations
+```{r}
+cutoff <- 4 / (nrow(video_filted) - length(fit$coefficients) - 2)
+plot(fit, which = 4, cook.levels = cutoff)
+abline(h = cutoff, lty = 2, col = "red")
+```
+Similarly, most of the videos with car type are influential observations. This can also be seen from the scatter plot.
+
+```{r}
+library(car)
+avPlots(fit, ask = FALSE, id.method = "identify")
+```
+
+Combination
+```{r}
+influencePlot(fit, id.method = "identify", main = "Influence Plot",
+              sub="Circle size is proportional to Cook's distance")
+```
+
+```{r}
+fit7 <- fit
+summary(fit7)
+```
+
+## 2.8 final model
+
+Now fit7 is very close to our final model. But fit7 has 32 coefficients and the model is too complicated. Therefore, in the last step, we try to delete some variables to make the model as simple as possible.
+
+```{r}
+## delete 'log(share):duration'
+finalfit1 <- lm(
+  log(like) ~ author + log(comment) + log(share) + BGM + duration + type +
+    title + month + period + log(comment):iscar + log(share):iscar +
+    BGM:iscar + duration:iscar + month:iscar,
+  data = video_filted
+)
+anova(finalfit1, fit)
+
+## delete 'BGM', 'period'
+finalfit2 <- lm(
+  log(like) ~ author + log(comment) + log(share) + duration + type +
+    title + month + log(comment):iscar + log(share):iscar +
+    BGM:iscar + duration:iscar + month:iscar,
+  data = video_filted
+)
+anova(finalfit2, finalfit1)
+```
+It is reasonable to delete these features since the p-values are greater than 0.05. 
+
+```{r}
+finalfit <- finalfit2
+summary(finalfit)
+```
+This is our final linear model exactly.
+
+## 2.9 The overall modeling process 
+
+Comparison: (fit1, fit7, finalfit)
+```{r}
+library(stargazer)
+
+tp <-
+  c(
+    "author",
+    "comment",
+    "share",
+    "BGM",
+    "duration",
+    "type",
+    "title",
+    "quarter",
+    "month",
+    "week",
+    "weekday",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "period"
+  )
+
+stargazer(
+  fit1,
+  fit7,
+  finalfit,
+  omit = tp,
+  omit.lables = tp,
+  type = "text"
+)
+```
+From fit1 to finalfit, the number of coefficients dropped from 96 to 25, the $R^2$ increased by $10.92%$, and the adjusted $R^2$ increased by $11.3%$. 
+
+
+## 2.10 Cross validation & relative importance
+### 2.10.1 cross validation
+```{r}
+library(caret)
+set.seed(1234)
+
+train_control <- trainControl(method = "CV", number = 10)
+
+model <-
+  train(
+    log(like) ~ author + log(comment) + log(share) + duration + type +
+      title + month + log(comment):iscar + log(share):iscar +
+      BGM:iscar + duration:iscar + month:iscar,
+    data = video_filted,
+    method = "lm",
+    trControl = train_control
+  )
+
+print(model)
+```
+Our linear model is robust since the performance persists. It has a strong generalization ability for short video data.
+
+### 2.10.2 relative importance
+```{r}
+relweights <- function(fit, ...) {
+  R <- cor(fit$model)
+  nvar <- ncol(R)
+  rxx <- R[2:nvar, 2:nvar]
+  rxy <- R[2:nvar, 1]
+  svd <- eigen(rxx)
+  evec <- svd$vectors
+  ev <- svd$values
+  delta <- diag(sqrt(ev))
+  lambda <- evec %*% delta %*% t(evec)
+  lambdasq <- lambda ^ 2
+  beta <- solve(lambda) %*% rxy
+  rsquare <- colSums(beta ^ 2)
+  rawwgt <- lambdasq %*% beta ^ 2
+  import <- (rawwgt / rsquare) * 100
+  import <- as.data.frame(import)
+  row.names(import) <- names(fit$model[2:nvar])
+  names(import) <- "weights"
+  import <- import[order(import), 1, drop = FALSE]
+  dotchart(
+    import$weights,
+    labels = row.names(import),
+    xlab = " % of R-Square",
+    pch = 19,
+    main = "Relative Importance of Predictor Variables",
+    ...
+  )
+  return(import)
+}
+```
+
+Introduce dummy variables corresponding to each categorical variable so that we can calculate its relative importance.
+```{r}
+temp <- video_filted
+
+##
+temp$authorseveral <- 0
+temp$authoroften <- 0
+temp$authorfrequent <- 0
+
+temp$typemakeup <- 0
+temp$typegame <- 0
+temp$typedress <- 0
+temp$typepet <- 0
+temp$typecar <- 0
+temp$typeplot <- 0
+
+temp$month2 <- 0
+temp$month3 <- 0
+temp$month4 <- 0
+temp$month5 <- 0
+
+##
+temp$authorseveral[temp$author == "several"] <- 1
+temp$authoroften[temp$author == "often"] <- 1
+temp$authorfrequent[temp$author == "frequent"] <- 1
+
+temp$typemakeup[temp$type == "makeup"] <- 1
+temp$typegame[temp$type == "game"] <- 1
+temp$typedress[temp$type == "dress"] <- 1
+temp$typepet[temp$type == "pet"] <- 1
+temp$typecar[temp$type == "car"] <- 1
+temp$typeplot[temp$type == "plot"] <- 1
+
+temp$month2[temp$month == 2] <- 1
+temp$month3[temp$month == 3] <- 1
+temp$month4[temp$month == 4] <- 1
+temp$month5[temp$month == 5] <- 1
+```
+
+Relative importance：
+```{r warning=FALSE}
+tpfit <-
+  lm(
+    log(like) ~ authorseveral + authoroften + authorfrequent + log(comment) +
+      log(share) + duration + typemakeup + typegame + typedress + typepet +
+      typecar + typeplot + title + month2 + month3 + month4 + month5,
+    data = temp
+  )
+
+relweights(tpfit, col = "blue")
+```
+Factors influecning the number of likes: type > comment > share > duration > month, title, author
+
+
+# 3 Categorical Data Analysis
+Categorical variables: author, type, BGM, month, weekday and hour.
+
+## 3.1 Independence: chi-squared independence test 
+$H_0$: the two categorical variables are independent.
+
+- author
+```{r warning=FALSE}
+## author and type
+table <- table(video$author, video$type)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'author' and 'type' are not independent.
+```{r}
+## author and BGM
+table <- table(video$author, video$BGM)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'author' and 'BGM' are not independent.
+```{r}
+## author and month
+table <- table(video$author, video$month)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'author' and 'month' are not independent.
+```{r}
+## author and weekday
+table <- table(video$author, video$weekday)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'author' and 'weekday' are independent.
+```{r warning=FALSE}
+## author and hour
+table <- table(video$author, video$hour)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'author' and 'hour' are not independent.
+
+- type
+```{r warning=FALSE}
+## type and BGM
+table <- table(video$type, video$BGM)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'type' and 'BGM' are not independent.
+```{r}
+## type and month
+table <- table(video$type, video$month)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'type' and 'month' are not independent.
+```{r}
+## type and weekday
+table <- table(video$type, video$weekday)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'type' and 'weekday' are independent.
+```{r warning=FALSE}
+## type and hour
+table <- table(video$type, video$hour)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'type' and 'hour' are not independent.
+
+- BGM
+```{r warning=FALSE}
+## BGM and month
+table <- table(video$BGM, video$month)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'BGM' and 'month' are not independent.
+```{r}
+## BGM and weekday
+table <- table(video$BGM, video$weekday)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'BGM' and 'weekday' are independent.
+```{r warning=FALSE}
+## BGM and hour
+table <- table(video$BGM, video$hour)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'BGM' and 'hour' are not independent.
+
+- month
+```{r warning=FALSE}
+## month and weekday
+table <- table(video$month, video$weekday)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'month' and 'weekday' are not independent.
+```{r warning=FALSE}
+## month and hour
+table <- table(video$month, video$hour)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'month' and 'hour' are not independent.
+
+- weekday
+```{r warning=FALSE}
+## weekday and hour
+table <- table(video$weekday, video$hour)
+chisq.test(table)
+chisq.test(table)$observed
+round(chisq.test(table)$expected)
+```
+'weekday' and 'hour' are not independent.
+
+- Summary
+
+Independent: author and weekday, type and weekday, BGM and weekday
+
+Possible explanations for dependence(for example):
+
+'author' & 'BGM': authors who frequently post videos may put more effort into them, so they may use original BGM more frequently.
+
+'type' & 'hour': there are more short videos of game type in the midnight, possibly because the audience is mainly young people, and young people often stay up late.
+
+'BGM' & 'month': internet hot songs may be different every month, and popular tastes will also change.
+
+
+## 3.2 Group difference by ANOVA
+Motivation:
+There are too many categorical variables in our data set, so we want to use ANOVA to test statistical differences among the means of 'log(like)' of two or more groups for each grouping factor.
+
+### 3.2.1 Preparation
+Before applying the ANOVA, we should divide our data into two subgroups since one assumption for ANOVA is the homogeneity of variance. But we find that the variances of different types are significantly different. 
+```{r}
+attach(video)
+table(type)
+data.frame(setNames(aggregate(
+  log(like), by = list(type), FUN = mean
+), c("BGM", "mean")), setNames(aggregate(
+  log(like), by = list(type), FUN = sd
+), c("BGM", "sd"))[-1])
+detach(video)
+```
+```{r}
+bartlett.test(log(like) ~ type, data = video)
+```
+Homogeneity of variance is violated severally. The variance of the short video of the car type is significantly larger than other short videos, so we divide the data into car type short videos and non-car type short videos.
+```{r}
+car.ind <- which(video$type == "car")
+
+video.car <- video[car.ind, ]
+video.noncar <- video[-car.ind, ]
+video.noncar$type <-
+  factor(video.noncar$type,
+         levels = c("food", "makeup", "game", "dress", "pet", "plot"))
+```
+
+We conduct the test for several interested grouping factor on the whole data, car-type data and non-car type data respectively.
+```{r}
+## find p-value
+col <- function(data) {
+  pval.author <-
+    bartlett.test(log(like) ~ author, data = data)$p.value
+  pval.BGM <- bartlett.test(log(like) ~ BGM, data = data)$p.value
+  pval.month <-
+    bartlett.test(log(like) ~ month, data = data)$p.value
+  pval.weekday <-
+    bartlett.test(log(like) ~ weekday, data = data)$p.value
+  pval.period <-
+    bartlett.test(log(like) ~ period, data = data)$p.value
+  
+  col <-
+    round(c(pval.author, pval.BGM, pval.month, pval.weekday, pval.period),
+          8)
+  return(col)
+}
+
+col1 <- col(video)
+col2 <- col(video.car)
+col3 <- col(video.noncar)
+
+## p-value table
+data.frame(
+  grouping.factor = c("author", "BGM", "month", "weekday", "period"),
+  video = col1,
+  video.car = col2,
+  video.noncar = col3
+)
+```
+Obviously, if we use 'video', then the homogeneity of variance assumption would be violated for each grouping factor. But for both 'video.car' and 'video.noncar', the assumptions are satisfied better.
+
+So we use data 'video.noncar' and 'video.car' repectively.
+
+### 3.2.2 One-way ANOVA
+```{r}
+attach(video.noncar)
+```
+
+- One-way ANOVA with categorical grouping factor author
+```{r}
+### Group info
+table(author)
+data.frame(setNames(aggregate(
+  log(like), by = list(author), FUN = mean
+), c("author", "mean")), setNames(aggregate(
+  log(like), by = list(author), FUN = sd
+), c("author", "sd"))[-1])
+
+### Test for group difference
+aov_author <- aov(log(like) ~ author)
+summary(aov_author)
+```
+The p-value of the F test indicates that various types of 'author' indeed will influence the number of likes.
+
+```{r}
+### Outlier test
+library(car)
+outlierTest(aov_author)
+```
+There is no indication of outliers in the data.
+
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ author,
+          xlab = "BGM",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+Videos posted by diligent authors have a high number of likes, and short video bloggers have to work hard.
+
+```{r}
+### Multiple comparison
+TukeyHSD(aov_author)
+plot(TukeyHSD(aov_author))
+```
+
+```{r}
+### Homogeneity of variance
+bartlett.test(log(like) ~ author)
+```
+Homogeneity of variance is not satisfied.
+
+
+- One-way ANOVA with categorical grouping factor BGM
+```{r}
+### Group info
+table(BGM)
+data.frame(setNames(aggregate(
+  log(like), by = list(BGM), FUN = mean
+), c("BGM", "mean")), setNames(aggregate(
+  log(like), by = list(BGM), FUN = sd
+), c("BGM", "sd"))[-1])
+
+### Test for group difference
+aov_bgm <- aov(log(like) ~ BGM)
+summary(aov_bgm)
+```
+The p-value of the F test indicates that various types of BGM indeed will influence the number of likes.
+
+```{r}
+### Outlier test
+library(car)
+outlierTest(aov_bgm)
+```
+There is no indication of outliers in the data.
+
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ BGM,
+          xlab = "BGM",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+From the figure of $95\%$ confident interval, we can clearly find the difference between various types of BGM. Short videos with original BGM have higher likes and a small standard deviation. However, short videos with non-original BGM have few likes and large variance.
+
+```{r}
+### Multiple comparison
+TukeyHSD(aov_bgm)
+plot(TukeyHSD(aov_bgm))
+```
+
+```{r}
+### Normality
+## use 'video'
+temp <- lm(log(like) ~ BGM, data = video)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+## use 'video.noncar'
+temp <- lm(log(like) ~ BGM, data = video.noncar)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+
+re <- temp$residuals
+ks.test(re, "pnorm", mean = mean(re), sd = sd(re))
+```
+The two Q-Q plots strengthen our confidence that we can not easily use ANOVA for the whole data. The ks.test shows that the normality assumption should be rejected although the Q-Q plot looks good.
+
+```{r}
+### Homogeneity of variance
+bartlett.test(log(like) ~ BGM)
+```
+Homogeneity of variance is satisfied.
+
+
+
+- One-way ANOVA with categorical grouping factor BGM
+```{r}
+### Group info
+table(BGM)
+data.frame(setNames(aggregate(
+  log(like), by = list(BGM), FUN = mean
+), c("BGM", "mean")), setNames(aggregate(
+  log(like), by = list(BGM), FUN = sd
+), c("BGM", "sd"))[-1])
+
+### Test for group difference
+aov_bgm <- aov(log(like) ~ BGM)
+summary(aov_bgm)
+```
+The p-value of the F test indicates that various types of BGM indeed will influence the number of likes.
+
+```{r}
+### Outlier test
+library(car)
+outlierTest(aov_bgm)
+```
+There is no indication of outliers in the data.
+
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ BGM,
+          xlab = "BGM",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+From the figure of $95\%$ confident interval, we can clearly find the difference between various types of BGM. Short videos with original BGM have higher likes and a small standard deviation. However, short videos with non-original BGM have few likes and large variance.
+
+```{r}
+### Multiple comparison
+TukeyHSD(aov_bgm)
+plot(TukeyHSD(aov_bgm))
+```
+
+```{r}
+### Normality
+## use 'video'
+temp <- lm(log(like) ~ BGM, data = video)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+## use 'video.noncar'
+temp <- lm(log(like) ~ BGM, data = video.noncar)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+
+re <- temp$residuals
+ks.test(re, "pnorm", mean = mean(re), sd = sd(re))
+```
+The two Q-Q plots strengthen our confidence that we can not easily use ANOVA for the whole data. The ks.test shows that the normality assumption should be rejected although the Q-Q plot looks good.
+
+```{r}
+### Homogeneity of variance
+bartlett.test(log(like) ~ BGM)
+```
+Homogeneity of variance is satisfied.
+
+
+- One-way ANOVA with categorical grouping factor weekday
+```{r}
+### Group info
+table(weekday)
+data.frame(setNames(aggregate(
+  log(like), by = list(weekday), FUN = mean
+), c("Wweekday", "mean")),
+setNames(aggregate(
+  log(like), by = list(weekday), FUN = sd
+), c("weekday", "sd"))[-1])
+
+### Test for group difference
+aov_weekday <- aov(log(like) ~ weekday)
+summary(aov_weekday)
+```
+The p-value of the F test indicates the independent variable weekday will not influence the number of likes.
+
+```{r}
+### Outlier test
+library(car)
+outlierTest(aov_weekday)
+```
+There is no indication of outliers in the data.
+
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ weekday,
+          xlab = "weekday",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+There is no significant difference between each weekday, maybe a little more on Friday.
+
+```{r}
+### Multiple comparison
+TukeyHSD(aov_weekday)
+
+tuk <- TukeyHSD(aov_weekday)
+psig <- as.numeric(apply(tuk$weekday[, 2:3], 1, prod) >= 0) + 1
+op <- par(mar = c(4.2, 9, 3.8, 2))
+plot(tuk, col = psig, yaxt = "n")
+for (j in 1:length(psig)) {
+  axis(
+    2,
+    at = j,
+    labels = rownames(tuk$weekday)[length(psig) - j + 1],
+    las = 1,
+    cex.axis = .8,
+    col.axis = psig[length(psig) - j + 1]
+  )
+}
+par(op)
+```
+
+```{r}
+### Normality
+temp <- lm(log(like) ~ weekday, data = video.noncar)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+
+re <- temp$residuals
+ks.test(re, "pnorm", mean = mean(re), sd = sd(re))
+```
+The ks.test shows that the normality assumption should be rejected although the Q-Q plot looks good.
+
+```{r}
+### Homogeneity of variance
+bartlett.test(log(like) ~ weekday)
+```
+Homogeneity of variance is satisfied.
+
+- One-way ANOVA with categorical grouping factor period
+```{r}
+### Group info
+table(period)
+data.frame(setNames(aggregate(
+  log(like), by = list(period), FUN = mean
+), c("period", "mean")),
+setNames(aggregate(
+  log(like), by = list(period), FUN = sd
+), c("period", "sd"))[-1])
+
+### Test for group difference
+aov_period <- aov(log(like) ~ period)
+summary(aov_period)
+```
+The p-value of the F test indicates period indeed will influence the number of likes.
+
+```{r}
+### Outlier test
+library(car)
+outlierTest(aov_period)
+```
+There is no indication of outliers in the data.
+
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ period,
+          xlab = "period",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+```{r}
+### Plot group means, confidence intervals
+library(gplots)
+plotmeans(log(like) ~ hour,
+          xlab = "hour",
+          ylab = "log(like)",
+          main = "Mean Plot with 95% CI")
+```
+The variance of the number of likes of short videos posted in the early morning(2:00-7:00) is very large, but the overall average is very low. So we can conclude that some short videos with excellent quality are released in the early morning.
+
+Golden time for short video release: 18:00-20:00.
+
+```{r}
+### Multiple comparison
+TukeyHSD(aov_period)
+
+tuk <- TukeyHSD(aov_period)
+psig <- as.numeric(apply(tuk$period[, 2:3], 1, prod) >= 0) + 1
+op <- par(mar = c(4.2, 9, 3.8, 2))
+plot(tuk, col = psig, yaxt = "n")
+for (j in 1:length(psig)) {
+  axis(
+    2,
+    at = j,
+    labels = rownames(tuk$period)[length(psig) - j + 1],
+    las = 1,
+    cex.axis = .8,
+    col.axis = psig[length(psig) - j + 1]
+  )
+}
+par(op)
+```
+Significantly different in mean levels: 20:00-9:00 and 16:00-18:00, 20:00-9:00 and 18:00-20:00
+
+```{r}
+### Normality
+temp <- lm(log(like) ~ period, data = video.noncar)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+
+re <- temp$residuals
+ks.test(re, "pnorm", mean = mean(re), sd = sd(re))
+```
+The ks.test shows that the normality assumption should be rejected although the Q-Q plot looks good.
+
+```{r}
+### Homogeneity of variance
+bartlett.test(log(like) ~ period)
+```
+Homogeneity of variance is satisfied.
+
+
+### 3.2.3 Two-way ANOVA
+- Two-way ANOVA with categorical grouping factor weekday and period
+```{r}
+### Group info
+table(weekday, period)
+data.frame(setNames(
+  aggregate(log(like), by = list(weekday, period), FUN = mean),
+  c("weekday", "period", "mean")
+),
+setNames(aggregate(
+  log(like), by = list(weekday, period), FUN = sd
+), c("weekday", "period", "sd"))[-c(1, 2)])
+
+### Test for group difference
+aov.weekday.period <- aov(log(like) ~ weekday * period)
+summary(aov.weekday.period)
+```
+
+```{r}
+### Normality
+temp <- lm(log(like) ~ weekday * period, data = video.noncar)
+qqPlot(temp,
+       simulate = TRUE,
+       main = "Q-Q Plot",
+       labels = FALSE)
+re <- temp$residuals
+ks.test(re, "pnorm", mean = mean(re), sd = sd(re))
+```
+The ks.test shows that the normality assumption should be rejected although the Q-Q plot looks good.
+
+```{r}
+interaction.plot(
+  weekday,
+  period,
+  log(like),
+  type = "b",
+  col = c("#482173", "#2e6f8e", "#29af7f", "#bddf26", "#ebec2f"),
+  pch = 24,
+  main = "Interaction between weekday and period"
+)
+
+
+library(gplots)
+plotmeans(
+  log(like) ~ interaction(weekday, period, sep = ""),
+  connect = list(
+    c(1, 6, 11, 16, 21, 26, 31),
+    c(2, 7, 12, 17, 22, 27, 32),
+    c(3, 8, 13, 18, 23, 28, 33),
+    c(4, 9, 14, 19, 24, 29, 34),
+    c(5, 10, 15, 20, 25, 30, 35)
+  ),
+  col = c("#482173", "#2e6f8e", "#29af7f", "#bddf26", "#ebec2f"),
+  main = "Interaction Plot with 95% CIs",
+  xlab = "weekday and period Combination"
+)
+```
+
+```{r}
+detach(video.noncar)
+```
+
+
+### 3.2.4 One-way ANCOVA
+```{r}
+temp <- video.noncar
+temp$log.comment <- log(video.noncar$comment)
+temp$log.share <- log(video.noncar$share)
+```
+- Covariavte is log(comment) (log(share) is similar)
+
+```{r}
+## author
+library(HH)
+cova <- ancova(log(like) ~ log.comment * author, data = temp)
+cova
+library(effects)
+effect("author", cova)
+```
+The effect of 'author'
+
+```{r}
+## BGM
+library(HH)
+cova <- ancova(log(like) ~ log.comment * BGM, data = temp)
+cova
+library(effects)
+effect("BGM", cova)
+```
+The effect of 'BGM'
+
+```{r}
+## month
+library(HH)
+cova <- ancova(log(like) ~ log.comment * month, data = temp)
+cova
+library(effects)
+effect("month", cova)
+```
+The effect of 'month'
+
+```{r}
+## weekday
+library(HH)
+cova <- ancova(log(like) ~ log.comment * weekday, data = temp)
+cova
+library(effects)
+effect("weekday", cova)
+```
+The effect of 'weekday'
+
+```{r}
+## period
+library(HH)
+cova <- ancova(log(like) ~ log.comment * period, data = temp)
+cova
+library(effects)
+effect("period", cova)
+```
+The effect of 'period'
+
+
+# 4 Use nonparametric method to verify linear regression & ANOVA
+Motivation:
+By ks.test(), the normality assumptions for both linear regression and ANOVA are violated.
+
+## 4.1 Permutation test for linear regression
+```{r}
+residual <- finalfit$residuals
+ks.test(residual,
+        "pnorm",
+        mean = mean(residual),
+        sd = sd(residual))
+```
+Although the fitting effect of the linear model is very good, with an $R^2$ as high as $82.31\%$, the model does not pass the normality test.
+
+Therefore, we use non-parametric methods to test the significance of regression coefficients.
+```{r}
+library(lmPerm)
+set.seed(1234)
+
+model_p <-
+  lmp(
+    log(like) ~ author + log(comment) + log(share) + duration + type +
+      title + month + log(comment):iscar + log(share):iscar +
+      BGM:iscar + duration:iscar + month:iscar,
+    data = video_filted,
+    perm = "Prob"
+  )
+
+summary(model_p)
+```
+
+```{r}
+summary(finalfit)
+```
+Except for the significant difference between the food type and April's coefficient, the significance level of the other coefficients are basically the same.
+
+## 4.2 Permutation test for ANOVA
+- One-way ANOVA permutation test
+```{r}
+library(lmPerm)
+set.seed(1234)
+## author
+aov_author_p <- aovp(log(like) ~ author, data = video.noncar, perm = "Prob")
+summary(aov_author_p)
+
+## BGM
+aov_bgm_p <- aovp(log(like) ~ BGM, data = video.noncar, perm = "Prob")
+summary(aov_bgm_p)
+
+## weekday
+aov_weekday_p <-
+  aovp(log(like) ~ weekday, data = video.noncar, perm = "Prob")
+summary(aov_weekday_p)
+
+## period
+aov_period_p <-
+  aovp(log(like) ~ period, data = video.noncar, perm = "Prob")
+summary(aov_period_p)
+```
+The results are compatible with conclusions in ANOVA section.
+
+
+- Two-way ANOVA permutation test
+```{r}
+library(lmPerm)
+set.seed(1234)
+
+## weekday*period
+aov_weekday_period_p <-
+  aovp(log(like) ~ weekday * period, data = video.noncar, perm = "Prob")
+summary(aov_weekday_period_p)
+```
+The same conclusion compared with two-way ANOVA before.
+
+
+## 4.3 Bootstrap method
+Since the normality assumption is violated, we use bootstrap to calculate some statistics and generate confidence intervals of them.
+```{r message=FALSE}
+library(boot)
+```
+- Bootstrap for R-squared
+```{r}
+rsq <- function(formula, data, indices) {
+  d <- data[indices, ]
+  fit <- lm(formula, data = d)
+  return(summary(fit)$r.square)
+}
+
+set.seed(1234)
+results <-
+  boot(
+    data = video,
+    statistic = rsq,
+    R = 1000,
+    formula = log(like) ~ author + log(comment) + log(share) + duration + 
+      type + title + month + log(comment):iscar + log(share):iscar +
+      BGM:iscar + duration:iscar + month:iscar
+  )
+print(results)
+
+plot(results)
+boot.ci(results, type = c("perc"))
+```
+
+```{r}
+## linear regression R-squared
+summary(fit)$r.square
+```
+The $R^2$ obtained by our linear regression model is 0.82. Therefore, although the normality assumption is violated for linear regression, the $R^2$ obtained by linear regression is credible from the bootstrap result. By the bootstrap method, a $95\%$ confidence interval of $R^2$ is given above.
+
+- Bootstrap for regression coefficients
+```{r}
+bs <- function(formula, data, indices) {
+  d <- data[indices,]
+  fit <- lm(formula, data = d)
+  return(coef(fit))
+}
+
+library(boot)
+set.seed(1234)
+results <-
+  boot(
+    data = video,
+    statistic = bs,
+    R = 1000,
+    formula = log(like) ~ author + log(comment) + log(share) + duration + 
+      type + title + month + log(comment):iscar + log(share):iscar + 
+    BGM:iscar + duration:iscar + month:iscar
+  )
+
+print(results)
+```
+
+Comparison: (linear regression & bootstrap)
+```{r}
+## estimated value
+coef <- data.frame(summary(finalfit)$coefficients[, 1], results$t[1000,])
+colnames(coef) <- c("linear regression", "bootstrap")
+round(coef,10)
+```
+Surprisingly similar!
+
+```{r}
+## confidence interval
+ci <- data.frame(confint(finalfit), confint(results))
+colnames(ci) <-
+  c("linear 2.5%", "linear 97.5%", "boot 2.5%", "boot 97.5%")
+ci
+```
+Almost the same!
+
+```{r}
+## authorseveral
+plot(results, index = 2)
+
+## authoroften
+plot(results, index = 3)
+
+## authorfrequent
+plot(results, index = 4)
+
+## log(comment)
+plot(results, index = 5)
+
+## log(share)
+plot(results, index = 6)
+
+## duration
+plot(results, index = 7)
+
+## typemakeup
+plot(results, index = 8)
+
+## typegame
+plot(results, index = 9)
+
+## typedress
+plot(results, index = 10)
+
+## typepet
+plot(results, index = 11)
+
+## typecar
+plot(results, index = 12)
+
+## typeplot
+plot(results, index = 13)
+
+## title
+plot(results, index = 14)
+
+## month2
+plot(results, index = 15)
+
+## month3
+plot(results, index = 16)
+
+## month4
+plot(results, index = 17)
+
+## month5
+plot(results, index = 18)
+
+## log(comment):iscar
+plot(results, index = 19)
+
+## log(share):iscar
+plot(results, index = 20)
+
+## iscar:BGMOriginal
+plot(results, index = 21)
+
+## duration:iscar
+plot(results, index = 22)
+
+## month2:iscar
+plot(results, index = 23)
+
+## month3:iscar
+plot(results, index = 24)
+
+## month4:iscar
+plot(results, index = 25)
+
+## month5:iscar
+plot(results, index = 26)
+```
+
+
+# 5 Clustering analysis of short video
+- Goal: Use the number of likes, comments and shares to aggregate short video data into different clusters.
+
+## 5.1 Scatter plot
+```{r}
+library(viridisLite)
+## Randomly reorder the index
+set.seed(1234)
+train <- sample(nrow(video), 1 * nrow(video))
+numdata <- log(video[train, c("like", "comment", "share")])
+
+
+
+library(plotly)
+fig <-
+  plot_ly(
+    numdata,
+    x = numdata$comment,
+    y = numdata$share,
+    z = numdata$like,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+The scatter plot seems to show two clusters, and both clusters are ellipsoidal. Both clusters are closer to the center, the more the points are. And the two clusters are almost centrally symmetrical, conforming to the characteristics of multivariate Gaussian distribution.
+
+Therefore, we first consider the Gaussian mixture model.
+
+## 5.2 Gaussian Mixture Models
+```{r}
+library("mclust")
+set.seed(1234)
+video_mclust <- Mclust(numdata, G = 1:5)
+print(video_mclust)
+table(video_mclust$classification)
+cluster <- video_mclust$classification
+```
+
+```{r}
+tp <- video[train,]
+tp$cluster <- 0
+ind1 <- cluster == 1
+ind2 <- cluster == 2
+ind3 <- cluster == 3
+ind4 <- cluster == 4
+ind5 <- cluster == 5
+tp[ind1, ]$cluster <- 1
+tp[ind2, ]$cluster <- 2
+tp[ind3, ]$cluster <- 3
+tp[ind4, ]$cluster <- 4
+tp[ind5, ]$cluster <- 5
+table(tp$cluster,tp$type)
+```
+
+- Visualization
+```{r}
+library(plotly)
+temp <- numdata
+temp$cluster <- cluster
+temp$cluster <- factor(temp$cluster)
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    color = temp$cluster,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+
+fig
+```
+The Gaussian mixture model is clustered into five clusters, and the head and tail can be distinguished well. If you gather two clusters, then the two clusters are well distinguished.
+
+The clustering effect of Gaussian mixture model is already very good, but we need to compare it with several other methods.
+
+## 5.3 Hierarchical Clustering
+```{r warning=FALSE}
+library(dendextend)
+library(colormap)
+
+video_dist <- dist(numdata)
+video_average <- hclust(video_dist, method = "average")
+dend <- as.dendrogram(video_average)
+
+leafcolor <-
+  colormap(
+    colormap = colormaps$viridis,
+    nshades = 10,
+    format = "hex",
+    alpha = 1,
+    reverse = FALSE
+  )
+
+dend %>%
+  set("labels_col", value = leafcolor, k = 10) %>%
+  set("branches_k_color", value = leafcolor, k = 10) %>%
+  plot(
+    horiz = TRUE,
+    axes = TRUE,
+    leaflab = "none",
+    main = "Cluster Dendrogram"
+  )
+```
+
+```{r}
+## cut at height = 4
+cluster <- cutree(video_average, h = 4)
+
+tp <- video[train,]
+tp$cluster <- 0
+ind1 <- cluster == 1
+ind2 <- cluster == 2
+ind3 <- cluster == 3
+tp[ind1,]$cluster <-1
+tp[ind2,]$cluster <-2
+tp[ind3,]$cluster <-3
+## 3 clusters
+table(tp$cluster,tp$type)
+```
+
+- Visualiztion
+```{r}
+library(dplyr)
+video_hier <- data.frame(numdata, cluster)
+video_hier <- arrange(video_hier, cluster)
+video_dist <- dist(video_hier[c(1, 2, 3)])
+library(lattice)
+library(viridisLite)
+#### the figure is too large
+#levelplot(
+#  as.matrix(video_dist),
+#  xlab = "video",
+#  ylab = "video",
+#  col.regions = viridis(100),
+#  scales = list(draw = FALSE)
+#) 
+```
+
+```{r}
+library(plotly)
+temp <- numdata
+temp$cluster <- cluster
+temp$cluster <- factor(temp$cluster)
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    color = temp$cluster,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+The hierarchical clustering effect is obviously worse than that of the Gaussian mixture model, and the two major clusters are not completely separated. 
+
+The two yellow points happen to be the outliers tested by the linear model.
+
+## 5.4 KMeans
+```{r}
+rge <- apply(numdata, 2, max) - apply(numdata, 2, min)
+numdata.dat <-
+  sweep(numdata, 2, rge, FUN = "/") 
+n <- nrow(numdata.dat)
+wss <- rep(0, 10)
+wss[1] <- (n - 1) * sum(apply(numdata.dat, 2, var))
+for (i in 2:10)
+  wss[i] <- sum(kmeans(numdata.dat, centers = i)$withinss)
+
+plot(1:10,
+     wss,
+     type = "b",
+     xlab = "Number of groups",
+     ylab = "Within groups sum of squares")
+```
+The plot sugguests that we should consider k = 2 or 3.
+
+- k = 2
+```{r}
+numdata_kmeans <- kmeans(numdata.dat, centers = 2)
+cluster <- numdata_kmeans$cluster
+```
+
+- Visualization
+```{r}
+library(dplyr)
+numdata_kmeans <- data.frame(numdata.dat, cluster)
+numdata_reorder <-
+  arrange(numdata_kmeans, cluster)
+video_dist <- dist(numdata_reorder[c(1, 2, 3)])
+
+library(lattice)
+library(viridisLite)
+#### the figure is too large
+#levelplot(
+#  as.matrix(video_dist),
+#  xlab = "video",
+#  ylab = "video",
+#  col.regions = viridis(100),
+#  scales = list(draw = FALSE)
+#)
+```
+
+```{r}
+library(plotly)
+temp <- numdata_kmeans
+temp$cluster <- factor(temp$cluster)
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    color = temp$cluster,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+
+fig
+```
+
+```{r}
+tp <- video[train,]
+tp$cluster <- 0
+ind1 <- cluster == 1
+ind2 <- cluster == 2
+tp[ind1,]$cluster <-1
+tp[ind2,]$cluster <-2
+table(tp$cluster,tp$type)
+```
+
+- k = 3
+```{r}
+numdata_kmeans <- kmeans(numdata.dat, centers = 3)
+cluster <- numdata_kmeans$cluster
+```
+
+- Visualization
+```{r}
+library(dplyr)
+numdata_kmeans <- data.frame(numdata.dat, cluster)
+numdata_reorder <-
+  arrange(numdata_kmeans, cluster)
+video_dist <- dist(numdata_reorder[c(1, 2, 3)])
+
+library(lattice)
+library(viridisLite)
+#### the figure is too large
+#levelplot(
+#  as.matrix(video_dist),
+#  xlab = "video",
+#  ylab = "video",
+#  col.regions = viridis(100),
+#  scales = list(draw = FALSE)
+#)
+```
+
+```{r}
+library(plotly)
+temp <- numdata_kmeans
+temp$cluster <- factor(temp$cluster)
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    color = temp$cluster,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+
+fig
+```
+
+```{r}
+tp <- video[train,]
+tp$cluster <- 0
+ind1 <- cluster == 1
+ind2 <- cluster == 2
+ind3 <- cluster == 3
+tp[ind1,]$cluster <-1
+tp[ind2,]$cluster <-2
+tp[ind3,]$cluster <-3
+table(tp$cluster,tp$type)
+```
+KMeans clustering separates the above major cluster, which is different from the previous Gaussian mixture model. The oblique direction is the direction of the first principal component, and a cross section perpendicular to the principal component direction separates them.
+
+## 5.5 Generative model
+Motivation: The Gaussian mixture model can be used not only for clustering, but also as a generative model, so we use gaussian mixture model to generate new data. And we use the generated data to test the classifier we will build later.
+
+- Density function learned by Mclust()
+```{r}
+library(MASS)
+mu1 <- video_mclust$parameters$mean[, 1]
+mu2 <- video_mclust$parameters$mean[, 2]
+mu3 <- video_mclust$parameters$mean[, 3]
+mu4 <- video_mclust$parameters$mean[, 4]
+mu5 <- video_mclust$parameters$mean[, 5]
+sigma1 <- video_mclust$parameters$variance$sigma[, , 1]
+sigma2 <- video_mclust$parameters$variance$sigma[, , 2]
+sigma3 <- video_mclust$parameters$variance$sigma[, , 3]
+sigma4 <- video_mclust$parameters$variance$sigma[, , 4]
+sigma5 <- video_mclust$parameters$variance$sigma[, , 5]
+
+p <- video_mclust$parameters$pro
+```
+
+- function for generating new data
+```{r}
+gaussian.generate <- function(n) {
+  newdata <- data.frame(matrix(rep(0, 3 * n), nrow = n))
+  
+  set.seed(1234)
+  for (i in 1:n) {
+    z <- rmultinom(1, 1, p)
+    newdata[i, ] <- t(z) %*%
+      rbind(
+        mvrnorm(1, mu1, sigma1),
+        mvrnorm(1, mu2, sigma2),
+        mvrnorm(1, mu3, sigma3),
+        mvrnorm(1, mu4, sigma4),
+        mvrnorm(1, mu5, sigma5)
+      )
+  }
+  return(newdata)
+}
+```
+
+- Visualization(origin data, n = 6131)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- log(video[c("like","comment","share")])
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+
+- Visualization(generated data, n = 6131)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- gaussian.generate(6131)
+fig <-
+  plot_ly(
+    temp,
+    x = temp$X2,
+    y = temp$X3,
+    z = temp$X1,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(
+    title = "",
+    scene = list(
+      bgcolor = "#e5ecf6"
+    )
+  )
+fig
+```
+
+Remove log and return to the original metric space.
+
+- Visualization(origin data, n = 6131)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- video[c("like","comment","share")]
+fig <-
+  plot_ly(
+    temp,
+    x = temp$comment,
+    y = temp$share,
+    z = temp$like,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+
+- Visualization(generated data, n = 6131)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- exp(gaussian.generate(6131))
+fig <-
+  plot_ly(
+    temp,
+    x = temp$X2,
+    y = temp$X3,
+    z = temp$X1,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(
+           bgcolor = "#e5ecf6",
+           xaxis = list(range = c(1, 120245)),
+           yaxis = list(range = c(1, 350000)),
+           zaxis = list(range = c(1, 4556768))
+         ))
+
+fig
+```
+
+- Visualization(generated data, n = 20000)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- exp(gaussian.generate(20000))
+fig <-
+  plot_ly(
+    temp,
+    x = temp$X2,
+    y = temp$X3,
+    z = temp$X1,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(
+           bgcolor = "#e5ecf6",
+           xaxis = list(range = c(1, 120245)),
+           yaxis = list(range = c(1, 350000)),
+           zaxis = list(range = c(1, 4556768))
+         ))
+
+fig
+```
+
+- Visualization(generated data, n = 100000)
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- exp(gaussian.generate(100000))
+fig <-
+  plot_ly(
+    temp,
+    x = temp$X2,
+    y = temp$X3,
+    z = temp$X1,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(
+           bgcolor = "#e5ecf6",
+           xaxis = list(range = c(1, 120245)),
+           yaxis = list(range = c(1, 350000)),
+           zaxis = list(range = c(1, 4556768))
+         ))
+
+fig
+```
+No matter which metric space is in, the distribution of our generated data is almost the same as that of the original data. The establishment of the generative model was very successful.
+
+
+# 6 Classification of short video types based on PCA
+Motivation: Open the short video interface of the mobile phone (take Tiktok as an example), all we can directly know are the number of likes, comments, shares, BGM, and title words. Then I want to use these data to determine which type of short video belongs to, and then decide whether I need to finish watching it, because if it’s not the type I like, then I don’t need to waste time. 
+
+Goal: Use the number of likes, comments, shares, BGM, and the number of title words to classify the type of each short video.
+
+## 6.1 Scatter plot
+```{r}
+library(plotly)
+fig <-
+  plot_ly(
+    x = log(video$comment),
+    y = log(video$share),
+    z = log(video$like),
+    color = video$type,
+    colors = viridis(7)
+  ) %>% add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "A 3D scatter plot for log(like), log(comment) and log(share)",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+The three-dimensional scatter plot seems to have obvious stratification effect by type.
+
+This layering feature is very consistent with the hyperplane segmentation characteristics of support vector machines. Therefore, I first consider the support vector machine, and use the number of likes, comments and shares to predict the short video type.
+
+## 6.2 Support Vector Machine
+```{r}
+## split the sample set
+set.seed(1234)
+video.class <- log(video[c("like", "comment", "share")])
+video.class$type <- video$type
+train <- sample(nrow(video.class), 0.7 * nrow(video.class))
+video.train <- video.class[train,]
+video.validate <- video.class[-train,]
+table(video.train$type_code)
+table(video.validate$type_code)
+
+library(e1071)
+set.seed(1234)
+fit.svm <-
+  svm(type ~ like + comment + share, data = video.train) ## have taken logarithm
+fit.svm
+
+svm.pred <- predict(fit.svm, na.omit(video.validate))
+svm.perf <- table(na.omit(video.validate)$type,
+                  svm.pred,
+                  dnn = c("Actual", "Predicted"))
+## confusion matrix
+svm.perf
+```
+
+- The function of calculating F1-score for multi-class classification
+```{r}
+myF1score <- function(matrix, dataset) {
+  TP <- diag(matrix)
+  FP <- apply(matrix, 2, sum) - TP
+  FN <- apply(matrix, 1, sum) - TP
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  F1 <- 2 * precision * recall / (precision + recall)
+  
+  ## weight
+  w <- table(dataset$type) / sum(table(dataset$type))
+  F1_w <- w %*% F1
+  
+  return(as.double(F1_w))
+}
+```
+
+
+- Tune parameters
+```{r}
+### tuning an RBF support vector machine
+#set.seed(1234)
+#
+### varies the parameters
+#tuned <- tune.svm(
+#  type ~ like + comment + share,
+#  data = video.train,
+#  gamma = 2 ^ (-7:7),
+#  cost = 2 ^ (-7:7)
+#)
+#tuned ## print the best model
+```
+
+- Use best parameters
+```{r}
+fit.svm <-
+  svm(
+    type ~ like + comment + share,
+    data = video.train,
+    gamma = 2,
+    cost = 2
+  )
+svm.pred <- predict(fit.svm, na.omit(video.validate))
+
+## evaluate the cross-validation performance
+svm.perf <- table(na.omit(video.validate)$type,
+                  svm.pred,
+                  dnn = c("Actual", "Predicted"))
+## confusion matrix
+svm.perf
+## accuracy
+sum(diag(svm.perf)) / sum(svm.perf)
+## F1score
+myF1score(svm.perf, video.validate)
+
+## visualization
+plot(fit.svm, video.train, comment ~ like, slice = list(share = 8))
+plot(fit.svm, video.train, share ~ like, slice = list(comment = 8))
+```
+
+- PCA for better classification performance
+```{r}
+numdata <- log(video[, c(3, 4, 5)])
+num_pca <- prcomp(numdata, scale = TRUE)
+print(num_pca)
+summary(num_pca)
+
+plot(
+  num_pca,
+  col = c("#440154FF", "#453781FF", "#33638DFF"),
+  main = "Variance proportion",
+  xlab = "principal component"
+)
+```
+
+- Visualization
+```{r}
+principal1 <- predict(num_pca)[, 1]
+principal2 <- predict(num_pca)[, 2]
+principal3 <- predict(num_pca)[, 3]
+
+library(plotly)
+fig <-
+  plot_ly(
+    numdata,
+    x = -principal3,
+    y = -principal2,
+    z = -principal1,
+    color = video$type,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+Using the three principal components as the coordinate axis to make a scatter plot, there is an obvious layering effect, and the layering effect of different types is more obvious than before.
+
+So we use PCA to get three principal components and then use SVM to classify.
+
+- SVM based on PCA
+```{r}
+temp <- data.frame(principal1, principal2, principal3)
+temp$type <- video$type
+
+## split the sample set
+set.seed(1234)
+train <- sample(nrow(temp), 0.7 * nrow(temp))
+video.train <- temp[train, ]
+video.validate <- temp[-train, ]
+table(video.train$type_code)
+table(video.validate$type_code)
+
+library(e1071)
+set.seed(1234)
+type <- video.train$type
+principal1 <- video.train$principal1
+principal2 <- video.train$principal2
+principal3 <- video.train$principal3
+fit.svm <-
+  svm(type ~ principal1 + principal2 + principal3)
+fit.svm
+
+svm.pred <- predict(fit.svm, na.omit(video.validate))
+svm.perf <- table(na.omit(video.validate)$type,
+                  svm.pred,
+                  dnn = c("Actual", "Predicted"))
+## confusion matrix
+svm.perf
+```
+
+- Tune paramaters
+```{r}
+### tuning an RBF support vector machine
+#set.seed(1234)
+#
+### varies the parameters
+#tuned <- tune.svm(
+#  type ~ principal1 + principal2 + principal3,
+#  gamma = 10 ^ (-8:8),
+#  cost = 10 ^ (-8:8)
+#)
+#tuned ## print the best model
+```
+
+- Use best parameters
+```{r}
+fit.svm <-
+  svm(
+    type ~ principal1 + principal2 + principal3,
+    gamma = 0.125,
+    cost = 128
+  )
+
+svm.pred <- predict(fit.svm, na.omit(video.validate))
+
+## evaluate the cross-validation performance
+svm.perf <- table(na.omit(video.validate)$type,
+                  svm.pred,
+                  dnn = c("Actual", "Predicted"))
+## confusion matrix
+svm.perf
+## accuracy
+sum(diag(svm.perf)) / sum(svm.perf)
+## F1score
+myF1score(svm.perf, video.validate)
+
+## visualization
+plot(fit.svm, temp, principal2 ~ principal1, slice = list(principal3 = 0))
+plot(fit.svm, temp, principal3 ~ principal1, slice = list(principal2 = 0))
+```
+Better performance than SVM without PCA.
+
+## 6.3 Decision Tree
+```{r}
+## split the sample set
+set.seed(1234)
+train <- sample(nrow(video), 0.7 * nrow(video))
+video.train <- video[train, ]
+video.validate <- video[-train, ]
+table(video.train$type)
+table(video.validate$type)
+
+## grow the tree
+library(rpart)
+set.seed(1234)
+
+dtree <- rpart(
+  type ~ like + comment + share + BGM + title,
+  data = video.train,
+  method = "class",
+  parms = list(split = "information")
+)
+## plot
+plotcp(dtree)
+dtree.pruned <- prune(dtree, cp = 0.012)
+library(rpart.plot)
+rpart.plot(dtree.pruned)
+
+## prediction
+dtree.pred <- predict(dtree.pruned, video.validate, type = "class")
+dtree.perf <- table(video.validate$type, dtree.pred,
+                    dnn = c("Actual", "Predicted"))
+## confusion matrix
+dtree.perf
+## accuracy
+sum(diag(dtree.perf)) / sum(dtree.perf)
+```
+Worse performance than PCA+SVM.
+
+## 6.4 Random Forest
+```{r}
+library(randomForest)
+set.seed(1234)
+
+### grow the forest
+fit.forest <-
+  randomForest(
+    type ~ like + comment + share + BGM + title,
+    data = video.train,
+    na.action = na.roughfix,
+    importance = TRUE
+  )
+
+#### classifies new cases
+forest.pred <- predict(fit.forest, video.validate)
+forest.perf <- table(video.validate$type,
+                     forest.pred,
+                     dnn = c("Actual", "Predicted"))
+## confusion matrix
+forest.perf
+## accuracy
+sum(diag(forest.perf)) / sum(forest.perf)
+```
+Worse performance than PCA+SVM.
+
+## 6.5 Use generated data to test the classifier(PCA+SVM)
+- Generate new data(n = 20000)
+```{r}
+newdata <- gaussian.generate(20000)
+```
+
+- Classify
+```{r}
+## PCA
+num_pca <- prcomp(newdata[c(1, 2, 3)], scale = TRUE)
+principal1 <- predict(num_pca)[, 1]
+principal2 <- predict(num_pca)[, 2]
+principal3 <- predict(num_pca)[, 3]
+```
+
+```{r}
+## SVM
+svm.pred <-
+  predict(fit.svm, data.frame(principal1, principal2, principal3))
+
+newdata$type <- svm.pred
+```
+
+- Visualization
+```{r}
+library(plotly)
+library(viridisLite)
+temp <- newdata
+fig <-
+  plot_ly(
+    temp,
+    x = temp$X2,
+    y = temp$X3,
+    z = temp$X1,
+    color = temp$type,
+    colors = viridis(7)
+  ) %>%  add_markers(size = 12)
+
+fig <- fig %>%
+  layout(title = "",
+         scene = list(bgcolor = "#e5ecf6"))
+fig
+```
+The effect is good, our classifier has good generalization performance.
+
+
+# 7 Conclusion
+
+给所有想成为短视频博主的朋友的建议，希望尽上一份绵薄之力：
+入行务必选定领域，剧情易火也需勤劳；
+游戏达人或须熬夜，汽车专家移步为好；
+时间标题越长越好，细看实则影响很小；
+转评数目尽力提高，内容质量必不可少。
+
+
+
+
+
