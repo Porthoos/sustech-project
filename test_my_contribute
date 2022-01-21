@@ -1,0 +1,3 @@
+public static class test {
+  private string name = "Ma Zhuoyuan";
+}
